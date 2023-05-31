@@ -71,7 +71,7 @@ class ChClientWrapper(ABC):
             self.has_lw_deletes, self.use_lw_deletes = self._check_lightweight_deletes(
                 credentials.use_lw_deletes
             )
-            self.atomic_exchange = not check_exchange or self._check_atomic_exchange()
+            self.atomic_exchange = not check_exchange or self._check_atomic_exchange(credentials.cluster)
         except Exception as ex:
             self.close()
             raise ex
@@ -151,18 +151,17 @@ class ChClientWrapper(ABC):
             ) from ex
         self._set_client_database()
 
-    def _check_atomic_exchange(self) -> bool:
+    def _check_atomic_exchange(self, cluster_name) -> bool:
         try:
             db_engine = self.command('SELECT engine FROM system.databases WHERE name = database()')
             if db_engine not in ('Atomic', 'Replicated'):
                 return False
-            create_cmd = (
-                'CREATE TABLE IF NOT EXISTS {} (test String) ENGINE MergeTree() ORDER BY tuple()'
-            )
             table_id = str(uuid.uuid1()).replace('-', '')
             swap_tables = [f'__dbt_exchange_test_{x}_{table_id}' for x in range(0, 2)]
+            cluster_clause = f" ON CLUSTER '{cluster_name}' " if cluster_name is not None else ''
             for table in swap_tables:
-                self.command(create_cmd.format(table))
+                create_cmd = f'CREATE TABLE IF NOT EXISTS {table} {cluster_clause} (test String) ENGINE MergeTree() ORDER BY tuple()'
+                self.command(create_cmd)
             try:
                 self.command('EXCHANGE TABLES {} AND {}'.format(*swap_tables))
                 return True
@@ -178,7 +177,7 @@ class ChClientWrapper(ABC):
             finally:
                 try:
                     for table in swap_tables:
-                        self.command(f'DROP TABLE IF EXISTS {table}')
+                        self.command(f'DROP TABLE IF EXISTS {table} {cluster_clause}')
                 except DbtDatabaseError:
                     logger.info('Unexpected server exception dropping table', exc_info=True)
         except DbtDatabaseError:
